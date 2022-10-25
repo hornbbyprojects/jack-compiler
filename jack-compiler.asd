@@ -6,8 +6,18 @@
   :license  "Specify license here"
   :version "0.0.1"
   :serial t
-  :depends-on (iterate str flexi-streams trivia cl-interpol)
+  :depends-on (iterate str flexi-streams trivia cl-interpol alexandria)
   :components ((:file "package")
                (:file "tokenizer")
-               (:file "parser" :depends-on ("tokenizer"))
+               (:file "expression" :depends-on ("tokenizer"))
+               (:file "statement" :depends-on ("tokenizer" "expression"))
+               (:file "parser" :depends-on ("tokenizer" "expression" "statement"))
+               (:file "to-xml" :depends-on ("parser"))
+               (:file "symbol-table" :depends-on ("parser"))
+               (:file "compiler" :depends-on ("parser" "symbol-table"))
                (:file "jack-compiler")))
+
+(asdf:defsystem "jack-compiler/test"
+  :depends-on (jack-compiler)
+  :components ((:file "test" :depends-on ("equiv"))
+               (:file "equiv")))

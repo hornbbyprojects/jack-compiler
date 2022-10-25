@@ -2,38 +2,17 @@
 
 (in-package #:jack-compiler)
 
-(defclass token-generator ()
-  ((peek :initarg :peek) (drop :initarg :drop)))
 
-(defun drop-token (token-generator)
-  (with-slots (drop) token-generator
-    (funcall drop)))
+(defun greedy-parse-repeatedly (maybe-parse token-generator)
+  "Keep calling maybe-parse on token-generator until it returns nil, and return the results"
+  (i:iterate
+    (i:for result next (funcall maybe-parse token-generator))
+    (when (null result)
+      (i:terminate))
+    (i:collecting result)))
 
-(defun peek-token (token-generator)
-  (with-slots (peek) token-generator
-    (funcall peek)))
-
-(defun read-token (token-generator)
-  (let ((ret (peek-token token-generator)))
-    (drop-token token-generator)
-    ret))
-
-(defun read-token-type (type token-generator)
-  (let ((token (read-token token-generator)))
-    (assert (typep token type))
-    token))
-
-(defun string-to-token-generator (input)
-  (let* ((words (str:words (add-whitespace-around-symbols input)))
-         (peek (lambda () (and words (tokenize-word (car words)))))
-         (drop (lambda () (pop words))))
-    (make-instance 'token-generator :peek peek :drop drop)))
 
 (defclass ast () ())
-
-(defmacro defconstant-new (name value)
-  `(when (not (boundp (quote ,name)))
-     (defconstant ,name ,value)))
 
 (defclass jack-class-definition (ast)
   ((name :initarg :name)
@@ -42,48 +21,83 @@
 
 (defclass jack-access-specificer (ast) ())
 (defclass jack-static-access (jack-access-specificer) ())
-(defconstant-new +jack-static-access+ (make-instance 'jack-static-access))
+(defparameter +jack-static-access+ (make-instance 'jack-static-access))
 (defclass jack-field-access (jack-access-specificer) ())
-(defconstant-new +jack-field-access+ (make-instance 'jack-field-access))
-(defclass jack-class-variable-declaration (ast)
-  ((access-specificer :initarg :access)
-   (type :initarg :type)
+(defparameter +jack-field-access+ (make-instance 'jack-field-access))
+
+(defclass jack-variable-declaration (ast)
+  ((type :initarg :type)
    (names :initarg :names)))
+
+(defclass jack-class-variable-declaration (jack-variable-declaration)
+  ((access-specifier :initarg :access)))
+
+(defclass jack-subroutine-variable-declaration (jack-variable-declaration) ())
+
+(defclass jack-parameter-list (ast)
+  ((parameters :initarg :parameters))) ;; An alist of parameters to types
+
+
+(defclass jack-class-subroutine-declaration (ast)
+  ((name :initarg :name)
+   (return-type :initarg :return-type)
+   (parameter-list :initarg :parameter-list)
+   (variable-declarations :initarg :variable-declarations)
+   (statements :initarg :statements)))
+
+(defun parameter-count (sub-decl)
+  (with-slots (parameter-list) sub-decl
+    (with-slots (parameters) parameter-list
+      (length parameters))))
+
+(defun subroutine-variable-count (sub-decl)
+  (with-slots (variable-declarations) sub-decl
+    (length variable-declarations)))
+
+(defclass jack-class-constructor-declaration (jack-class-subroutine-declaration) ())
+(defclass jack-class-method-declaration (jack-class-subroutine-declaration) ())
+(defclass jack-class-function-declaration (jack-class-subroutine-declaration) ())
 
 (defclass jack-type (ast) ())
 (defclass jack-type-int (jack-type) ())
-(defconstant-new +jack-type-int+ (make-instance 'jack-type-int))
+(defparameter +jack-type-int+ (make-instance 'jack-type-int))
 (defclass jack-type-char (jack-type) ())
-(defconstant-new +jack-type-char+ (make-instance 'jack-type-char))
+(defparameter +jack-type-char+ (make-instance 'jack-type-char))
 (defclass jack-type-boolean (jack-type) ())
-(defconstant-new +jack-type-boolean+ (make-instance 'jack-type-boolean))
+(defparameter +jack-type-boolean+ (make-instance 'jack-type-boolean))
 (defclass jack-type-class (jack-type) ((class-name :initarg :name)))
 
-(defclass jack-subroutine-declaration (ast) ())
-
-(defclass jack-parameter-list (ast) ())
+(defclass jack-type-void (jack-type) ((void-name :initarg :name)))
+(defparameter +jack-type-void+ (make-instance 'jack-type-void))
 
 (defclass jack-subroutine-body (ast) ())
 
-(defclass jack-variable-declaration (ast) ())
-
-(defclass jack-class-name (ast) ())
-
-(defclass jack-subroutine-name (ast) ())
-
-(defclass jack-variable-name (ast) ((name :initarg :name)))
+(defun maybe-parse-type (token-generator)
+  (let* ((token (peek-token token-generator))
+         (ret (trivia:match token
+                ((class int-token) +jack-type-int+)
+                ((class char-token) +jack-type-char+)
+                ((class boolean-token) +jack-type-boolean+)
+                ((class void-token) +jack-type-void+) ;; Allow making void variables as well, because why not
+                ((class identifier identifier-value) (make-instance 'jack-type-class :name identifier-value)))))
+    (when ret
+      (drop-token token-generator))
+    ret))
 
 (defun parse-type (token-generator)
-  (let ((token (read-token token-generator)))
-    (trivia:match token
-      ((class int-token) +jack-type-int+)
-      ((class char-token) +jack-type-char+)
-      ((class boolean-token) +jack-type-boolean+)
-      ((class identifier identifier-value) (make-instance 'jack-type-class :name identifier-value))
-      (otherwise (error #?"${token} is not a type")))))
+  (or
+   (maybe-parse-type token-generator)
+   (error #?"${(peek-token token-generator)} is not a type")))
+
+(defun maybe-parse-variable-name (token-generator)
+  (let ((next-token (maybe-read-token-type 'identifier token-generator)))
+    (when next-token
+      (identifier-value next-token))))
 
 (defun parse-variable-name (token-generator)
-  (make-instance 'jack-variable-name :name (read-token-type 'identifier token-generator)))
+  (or
+   (maybe-parse-variable-name token-generator)
+   (error "Expected an identifier for variable name!")))
 
 (defun maybe-parse-access-specifier (token-generator)
   (let* ((next-token (peek-token token-generator))
@@ -95,44 +109,78 @@
        (drop-token token-generator))
      ret))
 
-(defun maybe-parse-class-variable-declaration (token-generator)
-  (let ((access-specificer (maybe-parse-access-specifier token-generator)))
-    (when access-specificer
-      (let ((type (parse-type token-generator))
-            (names nil))
-        (push (parse-variable-name token-generator) names)
-        (i:iterate
-          (i:for maybe-comma next (peek-token token-generator))
-          (if (typep maybe-comma 'comma-token)
-              (progn
-                (drop-token token-generator)
-                (push (parse-variable-name token-generator) names))
-              (i:terminate)))
-        (read-token-type 'semicolon-token token-generator)
-        (make-instance 'jack-class-variable-declaration :names names :type type :access access-specificer)))))
+(defun maybe-parse-type-and-name (token-generator)
+  (let* ((type (maybe-parse-type token-generator))
+        (name (and type (parse-variable-name token-generator))))
+    (and type (cons name type))))
 
+(defun maybe-parse-class-variable-declaration (token-generator)
+  (let ((access-specifier (maybe-parse-access-specifier token-generator)))
+    (when access-specifier
+      (let ((type (parse-type token-generator))
+            (names (parse-comma-separated #'maybe-parse-variable-name token-generator)))
+        (read-token-type 'semicolon-token token-generator)
+        (make-instance 'jack-class-variable-declaration :names names :type type :access access-specifier)))))
+
+(defun parse-subroutine-name (token-generator)
+  (identifier-value (read-token-type 'identifier token-generator)))
+
+(defun parse-parameter-list (token-generator)
+  (read-token-type 'open-paren-token token-generator)
+  (let ((parameters (parse-comma-separated #'maybe-parse-type-and-name token-generator)))
+    (read-token-type 'close-paren-token token-generator)
+    (make-instance 'jack-parameter-list :parameters parameters)))
+
+
+(defun maybe-parse-subroutine-variable-declaration (token-generator)
+  (let ((var-token (maybe-read-token-type 'var-token token-generator)))
+    (when var-token
+      (let ((type (parse-type token-generator))
+            (names (parse-comma-separated #'maybe-parse-variable-name token-generator)))
+        (read-token-type 'semicolon-token token-generator)
+        (make-instance 'jack-subroutine-variable-declaration :type type :names names)))))
 
 (defun maybe-parse-class-subroutine-declaration (token-generator)
-  ())
+  (let* ((next-token (peek-token token-generator))
+         (class-type (trivia:match next-token
+                       ((class constructor-token)
+                        'jack-class-constructor-declaration)
+                       ((class method-token)
+                        'jack-class-method-declaration)
+                       ((class function-token)
+                        'jack-class-function-declaration))))
+    (when class-type
+      (drop-token token-generator)
+      (let* ((return-type (parse-type token-generator))
+             (name (parse-subroutine-name token-generator))
+             (parameter-list (parse-parameter-list token-generator))
+             (variable-declarations
+               (progn
+                 (read-token-type 'open-brace-token token-generator)
+                 (greedy-parse-repeatedly #'maybe-parse-subroutine-variable-declaration token-generator)))
+             (statements
+               (prog1
+                   (greedy-parse-repeatedly #'maybe-parse-statement token-generator)
+                 (read-token-type 'close-brace-token token-generator))))
+        (make-instance class-type
+                       :name name
+                       :parameter-list parameter-list
+                       :statements statements
+                       :variable-declarations variable-declarations
+                       :return-type return-type)))))
 
 (defun parse-class-name (token-generator)
     (identifier-value (read-token-type 'identifier token-generator)))
 
-(defun parse-class (token-generator)
-  (let ((name (parse-class-name token-generator))
-        (variable-declarations nil)
-        (subroutine-declarations nil))
-    (read-token-type 'open-brace-token token-generator)
-    (i:iterate
-      (i:for decl next (maybe-parse-class-variable-declaration token-generator))
-      (if (not decl)
-          (i:terminate))
-      (push decl variable-declarations))
-    (i:iterate
-      (i:for decl next (maybe-parse-class-subroutine-declaration token-generator))
-      (if (not decl)
-          (i:terminate))
-      (push decl subroutine-declarations))
+(defun parse-class-definition (token-generator)
+  (let* ((ct (read-token-type 'class-token token-generator))
+         (name (parse-class-name token-generator))
+         (open-brace (read-token-type 'open-brace-token token-generator))
+         (variable-declarations
+           (greedy-parse-repeatedly #'maybe-parse-class-variable-declaration  token-generator))
+         (subroutine-declarations
+           (greedy-parse-repeatedly #'maybe-parse-class-subroutine-declaration token-generator)))
+    (declare (ignore open-brace ct))
     (read-token-type 'close-brace-token token-generator)
     (make-instance 'jack-class-definition
                    :name name
@@ -140,9 +188,11 @@
                    :subroutine-declarations subroutine-declarations)))
 
 (defun parse (token-generator)
-  (let ((next-token (read-token token-generator)))
-    (format t #?"Read ${next-token}\n")
+  (let ((next-token (peek-token token-generator)))
     (trivia:match next-token
-      ((class class-token) (parse-class token-generator))
+      ((class class-token) (parse-class-definition token-generator))
       (otherwise (error #?"Unexpected token ${next-token}")))))
 
+(defun parse-file (filename)
+  (with-open-file (in filename)
+    (parse (tokenize-stream in))))
