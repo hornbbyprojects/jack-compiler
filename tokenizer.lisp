@@ -118,15 +118,23 @@ Or a cons cell with the string to be decoded and the name
      (equals . "=")
      (tilde . "~")))
 
-(defclass constant (token)
-  ((value :initarg :value :accessor constant-value)))
+(defclass literal-token (token)
+  ((value :initarg :value :accessor literal-value)))
 
-(defclass integer-constant (constant) ())
+(defclass integer-literal-token (literal-token) ())
 
-(defclass string-constant (constant) ())
+(defclass string-literal-token (literal-token) ())
 
+(defmethod print-object ((object literal-token) out)
+  (format out "#<literal (~a)>" (literal-value object)))
+
+(defmethod print-object ((object string-literal-token) out)
+  (format out "#<literal (\"~a\")>" (literal-value object)))
 (defclass identifier (token)
   ((value :initarg :value :accessor identifier-value)))
+
+(defmethod print-object ((object identifier) out)
+  (format out "#<Identifier (~a)>" (identifier-value object)))
 
 (defun build-symbols-class ()
   (i:iterate
@@ -134,108 +142,157 @@ Or a cons cell with the string to be decoded and the name
     (assert (= (length symbol) 1))
     (i:collecting (elt symbol 0))))
 
-
-(defun add-whitespace-around-symbols (line)
-  (cl-ppcre:regex-replace-all
-   `(:sequence
-     (:greedy-repetition 0 1 :whitespace-char-class)
-     (:register (:char-class ,@(build-symbols-class)))
-     (:greedy-repetition 0 1 :whitespace-char-class))
-   line
-   " \\1 "))
-
-
 (defun tokenize-word (word)
   (or
    (gethash word *token-lookup-table*)
-   (let ((register-matches (cadr (multiple-value-list (cl-ppcre:scan-to-strings
-                                                       '(:sequence
-                                                         #\"
-                                                         (:register
-                                                          (:greedy-repetition 0 NIL (:inverted-char-class #\")))
-                                                         #\") word)))))
-     (and
-      (> (length register-matches) 0)
-      (make-instance 'string-constant :value (elt register-matches 0))))
-   (handler-case
-       (make-instance 'integer-constant :value (parse-integer word))
-     (parse-error () ()))
    (make-instance 'identifier :value word)))
 
-(defclass buffered-token-generator (token-generator)
-  ((in-multiline-comment :initform nil :initarg :in-multiline-comment) (buffer :initform nil) (stream :initarg :stream) (stream-complete :initform nil)))
+(defclass sm-token-generator (token-generator)
+   ((next-token :initform nil :accessor peek-token)
+    (stream :initarg :stream)))
 
-(defmethod initialize-instance :after ((instance buffered-token-generator) &key i)
-  (declare (ignore i))
-  (refill-buffer instance))
 
-(alexandria:define-constant +inline-comment-regex+
-  "/\\*.*?\\*/" :test 'equal)
 
-(defun remove-inline-comments (line)
-  (cl-ppcre:regex-replace-all +inline-comment-regex+ line ""))
+(defun whitespace-char-p (char)
+  (trivia:match char
+    ((or
+      #\Space
+      #\Tab
+      #\Return
+      #\Newline) t)
+    (otherwise nil)))
 
-(defun close-multiline-comments (line token-generator)
-  (with-slots (in-multiline-comment) token-generator
-    (if in-multiline-comment
-        (multiple-value-bind (start end) (cl-ppcre:scan "\\*/" line)
-          (declare (ignore start))
-          (if end
-              (progn
-                (setf in-multiline-comment nil)
-                (str:substring end (length line) line))
-              ""))
-        line)))
-(defun open-multiline-comments (line token-generator)
-  (with-slots (in-multiline-comment) token-generator
-    (if (not in-multiline-comment)
-      (multiple-value-bind (start end) (cl-ppcre:scan "/\\*" line)
-        (declare (ignore end))
-        (if start
-            (progn
-              (setf in-multiline-comment t)
-              (str:substring 0 (1- start) line))
-            line))
-      line)))
+(defun skip-whitespace (stream)
+  (i:iterate
+    (i:for next-char next (peek-char nil stream))
+    (unless (whitespace-char-p next-char)
+      (i:terminate))
+    (read-char stream)))
 
-(defun handle-multiline-comments (line token-generator)
-  (let* ((line (remove-inline-comments line))
-         (line (close-multiline-comments line token-generator))
-         (line (open-multiline-comments line token-generator)))
-    line))
 
-(defun remove-single-line-comments (line)
-  (cl-ppcre:regex-replace "//.*" line  ""))
+(defun finish-single-line-comment (stream)
+  (i:iterate
+    (i:for next-char next (read-char stream nil :eof))
+    (when (or
+           (equal #\Newline next-char)
+           (equal :eof next-char))
+      (i:terminate))))
 
-(defun process-line (token-generator)
-  (with-slots (stream buffer stream-complete in-multiline-comment) token-generator
-    (unless stream-complete
-      (let* ((next-line (handler-case
-                            (read-line stream)
-                          (end-of-file () (setf stream-complete t) ())))
-             (next-line (handle-multiline-comments next-line token-generator))
-             (next-line (remove-single-line-comments next-line))
-             (next-line (add-whitespace-around-symbols next-line)))
-        (when next-line
-          (setf buffer (append buffer
-                               (i:iterate
-                                 (i:for word in (str:words next-line))
-                                 (i:collecting (tokenize-word word))))))))))
+(defun valid-identifier-char-p (char)
+  (and
+   (typep char 'character)
+   (or
+    (alphanumericp char)
+    (equal #\_ char))))
 
-(defmethod peek-token ((token-generator buffered-token-generator))
-  (with-slots (buffer) token-generator
-    (car buffer)))
+(defun finish-identifier (stream)
+  (i:iterate
+    (i:for next-char next (peek-char nil stream nil :eof))
+    (unless (valid-identifier-char-p next-char)
+      (i:terminate))
+    (read-char stream)
+    (i:collecting next-char result-type string)))
 
-(defun refill-buffer (token-generator)
-  (with-slots (stream-complete buffer) token-generator
-    (loop while (and (null buffer) (not stream-complete))
-          do (process-line token-generator))))
+(defun finish-multiline-comment (stream)
+  (i:iterate
+    (i:for next-char next (read-char stream))
+    (when
+        (and
+         (equal next-char #\*)
+         (equal (peek-char nil stream) #\/))
+      (read-char stream)
+      (i:terminate))))
 
-(defmethod drop-token ((token-generator buffered-token-generator))
-  (with-slots (buffer) token-generator
-    (pop buffer)
-    (when (null buffer)
-      (refill-buffer token-generator))))
+(defun finish-string-literal (stream)
+  (make-instance
+   'string-literal-token
+   :value
+   (i:iterate
+     (i:with escaped = nil)
+     (i:for next-char next (read-char stream))
+     (if escaped
+         (setf escaped nil)
+         (progn
+           (when (equal next-char #\")
+             (i:terminate))
+           (when (equal next-char #\\)
+             (setf escaped t)
+             (i:next-iteration))))
+     (i:collecting next-char result-type string))))
+
+(defun finish-integer-literal (stream)
+  (make-instance
+   'integer-literal-token
+   :value
+   (parse-integer
+    (i:iterate
+      (i:for next-char next (peek-char nil stream nil :eof))
+      (unless (and (typep next-char 'character) (digit-char-p next-char))
+        (i:terminate))
+      (read-char stream)
+      (i:collecting next-char result-type string)))))
+
+(defun next-token-from-stream (tg)
+  (with-slots (stream) tg
+    (skip-whitespace stream)
+    (let* ((next-char (peek-char nil stream))
+           (symbol (gethash (string next-char) *token-lookup-table*)))
+      (cond
+       ((equal next-char #\/)
+          (let ((next-char (read-char stream))
+                (subsequent (peek-char nil stream)))
+            (declare (ignore next-char))
+            (trivia:match subsequent
+              (#\*
+               (read-char stream)
+               (finish-multiline-comment stream)
+               :comment)
+              (#\/
+               (read-char stream)
+               (finish-single-line-comment stream)
+               :comment)
+              (otherwise
+               (make-instance 'forward-slash-token)))))
+       ((equal next-char #\")
+        (read-char stream)
+        (finish-string-literal stream))
+       ((digit-char-p next-char)
+        (finish-integer-literal stream))
+       (symbol
+        (read-char stream)
+        symbol)
+       ((valid-identifier-char-p next-char) (tokenize-word (finish-identifier stream)))
+       (t (error #?"While tokenizing, encountered char ${next-char}"))))))
+
+(defun ensure-next-token (token-generator)
+  (setf
+   (peek-token token-generator)
+   (handler-case
+       (i:iterate
+         (i:for next-token next (next-token-from-stream token-generator))
+         (when (not (equal next-token :comment))
+           (return next-token)))
+     (end-of-file () ()))))
+
+(defmethod initialize-instance :after ((instance sm-token-generator) &rest initargs)
+  (declare (ignore initargs))
+  (ensure-next-token instance))
+
+
+(defmethod drop-token ((token-generator sm-token-generator))
+  (setf (peek-token token-generator) nil)
+  (ensure-next-token token-generator))
 
 (defun tokenize-stream (stream)
-  (make-instance 'buffered-token-generator :stream stream))
+  (make-instance 'sm-token-generator :stream stream))
+
+(defun tokenize-string (str)
+  (let ((in (make-string-input-stream str)))
+    (tokenize-stream in)))
+
+(defun list-tokens (tg)
+  (i:iterate
+    (i:for next-token next (read-token tg))
+    (unless next-token
+      (i:terminate))
+    (i:collecting next-token)))

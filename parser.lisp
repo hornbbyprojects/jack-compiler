@@ -52,7 +52,10 @@
 
 (defun subroutine-variable-count (sub-decl)
   (with-slots (variable-declarations) sub-decl
-    (length variable-declarations)))
+    (i:iterate
+      (i:for variable-declaration in variable-declarations)
+      (with-slots (names) variable-declaration
+        (i:summing (length names))))))
 
 (defclass jack-class-constructor-declaration (jack-class-subroutine-declaration) ())
 (defclass jack-class-method-declaration (jack-class-subroutine-declaration) ())
@@ -88,16 +91,6 @@
   (or
    (maybe-parse-type token-generator)
    (error #?"${(peek-token token-generator)} is not a type")))
-
-(defun maybe-parse-variable-name (token-generator)
-  (let ((next-token (maybe-read-token-type 'identifier token-generator)))
-    (when next-token
-      (identifier-value next-token))))
-
-(defun parse-variable-name (token-generator)
-  (or
-   (maybe-parse-variable-name token-generator)
-   (error "Expected an identifier for variable name!")))
 
 (defun maybe-parse-access-specifier (token-generator)
   (let* ((next-token (peek-token token-generator))

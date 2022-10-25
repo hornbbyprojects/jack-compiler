@@ -60,26 +60,26 @@ Expressions are turned into commands that push the calculated value onto the sta
 (defun symbol-info-to-pop-command (symbol-info out)
   (with-slots (kind index) symbol-info
     (let ((segment (symbol-kind-to-segment kind)))
-      (write-line #?"pop ${segment} ${index}" out))))
+      (write-pop segment index out))))
 
 (defun symbol-info-to-push-command (symbol-info out)
   (with-slots (kind index) symbol-info
     (let ((segment (symbol-kind-to-segment kind)))
-      (write-line #?"push ${segment} ${index}" out))))
+      (write-push segment index out))))
 
 (defun symbol-info-to-indexed-push-command (context symbol-info index-offset out)
   (symbol-info-to-push-command symbol-info out)
   (jompile index-offset context out)
-  (write-line #?"add" out)
-  (write-line #?"pop pointer 1" out)
-  (write-line #?"push that 0" out))
+  (write-add out)
+  (write-pop-pointer-that out)
+  (write-push "that" 0 out))
 
 (defun symbol-info-to-indexed-pop-command (context symbol-info index-offset out)
   (symbol-info-to-push-command symbol-info out)
   (jompile index-offset context out)
-  (write-line #?"add" out)
-  (write-line #?"pop pointer 1" out)
-  (write-line #?"pop that 0" out))
+  (write-add out)
+  (write-pop-pointer-that out)
+  (write-pop "that" 0 out))
 
 (defmacro jompile-unary-op (classname vm-command)
   (alexandria:with-gensyms (node context out expr)
@@ -101,14 +101,23 @@ Expressions are turned into commands that push the calculated value onto the sta
 
 (jompile-binary-op jack-plus "add")
 (jompile-binary-op jack-minus "sub")
-(jompile-binary-op jack-times "eq")
-(jompile-binary-op jack-divide "gt")
-(jompile-binary-op jack-plus "lt")
-(jompile-binary-op jack-plus "and")
-(jompile-binary-op jack-plus "or")
+(jompile-binary-op jack-equals "eq")
+(jompile-binary-op jack-more-than "gt")
+(jompile-binary-op jack-less-than "lt")
+(jompile-binary-op jack-bitwise-and "and")
+(jompile-binary-op jack-bitwise-or "or")
 
+(defmethod jompile ((node jack-times) context out)
+  (with-slots (left right) node
+    (jompile left context out)
+    (jompile right context out)
+    (write-call "Math.multiply" 2 out)))
 
-
+(defmethod jompile ((node jack-divide) context out)
+  (with-slots (left right) node
+    (jompile left context out)
+    (jompile right context out)
+    (write-call "Math.divide" 2 out)))
 
 (defmethod jompile ((node jack-variable-reference) context out)
   (with-slots (name index) node
@@ -118,7 +127,22 @@ Expressions are turned into commands that push the calculated value onto the sta
           (symbol-info-to-push-command symbol-info out)))))
 
 (defmethod jompile ((node jack-integer-literal) context out)
-  (write-line #?"push constant ${(jack-literal-value node)}" out))
+  (write-push-constant (jack-literal-value node) out))
+
+(defmethod jompile ((node jack-null) context out)
+  (write-push-constant 0 out))
+
+(defmethod jompile ((node jack-string-literal) context out)
+  (with-slots (value) node
+    (write-push-constant (length value) out)
+    (write-call "String.new" 1 out)
+    (write-pop "temp" 1 out)
+    (i:iterate
+      (i:for char in-string value)
+      (write-push "temp" 1 out)
+      (write-push-constant (char-code char) out)
+      (write-call "String.appendChar" 2 out))
+    (write-push "temp" 1 out)))
 
 (defun jack-boolean-as-int (bool)
   (if bool
@@ -126,9 +150,10 @@ Expressions are turned into commands that push the calculated value onto the sta
       0))
 
 (defmethod jompile ((node jack-boolean-literal) context out)
-  (write-line #?"push constant ${(jack-boolean-as-int (jack-literal-value node))}" out))
+  (write-push-constant (jack-boolean-as-int (jack-literal-value node)) out))
+
 (defmethod jompile ((node jack-this) context out)
-  (write-line #?"push pointer 0" out))
+  (write-push-pointer-this out))
 
 (defmethod jompile ((node jack-let-statement) context out)
   (with-slots (name index value) node
@@ -141,62 +166,78 @@ Expressions are turned into commands that push the calculated value onto the sta
 (defmethod jompile ((node jack-do-statement) context out)
   (with-slots (expression) node
     (jompile expression context out)
-    (write-line #?"pop temp 0" out)))
+    (write-pop "temp" 0 out)))
 
 (defmethod jompile ((node jack-return-statement) context out)
   (with-slots (expression) node
     (if expression
         (jompile expression context out)
-        (write-line "push constant 0" out))
-    (write-line "return" out)))
+        (write-push-constant 0 out))
+    (write-return out)))
 
 (defmethod jompile ((node jack-if-statement) context out)
   (let ((end-label (get-label context "if-end"))
         (then-label (get-label context "if-then")))
     (with-slots (condition then-statements else-statements) node
-      (write-line #?"if-goto ${then-label}" out)
+      (jompile condition context out)
+      (write-if-goto then-label out)
       (i:iterate
         (i:for statement in else-statements)
         (jompile statement context out))
-      (write-line #?"goto ${end-label}" out)
-      (write-line #?"label ${then-label}" out)
+      (write-goto end-label out)
+      (write-label then-label out)
       (i:iterate
         (i:for statement in then-statements)
         (jompile statement context out))
-      (write-line #?"label ${end-label}" out))))
+      (write-label end-label out))))
+
+(defmethod jompile ((node jack-while-statement) context out)
+  (let ((begin-label (get-label context "while-beginning"))
+        (end-label (get-label context "while-end")))
+    (with-slots (condition statements) node
+      (write-label begin-label out)
+      (jompile condition context out)
+      (write-not out)
+      (write-if-goto end-label out)
+      (i:iterate
+        (i:for statement in statements)
+        (jompile statement context out))
+      (write-goto begin-label out)
+      (write-label end-label out))))
+
 
 (defmethod jompile ((node jack-subroutine-call) context out)
   (with-slots (current-class) context
     (with-slots (target-name subroutine-name arguments) node
       (let* ((is-method nil)
              (target-class
-              (if (null target-name)
-                  (let ((func-info (function-lookup context subroutine-name)))
-                    (when (function-is-method func-info)
-                      (write-line "push pointer 0" out)
-                      (setf is-method t))
-                    current-class)
-                  (let* ((target-symbol-info (symbol-lookup context target-name)))
-                    (if target-symbol-info
-                        (let ((target-type (symbol-type target-symbol-info)))
-                          (assert (typep target-type 'jack-type-class))
-                          (with-slots ((target-class-name class-name)) target-type
-                            (setf is-method t)
-                            (symbol-info-to-push-command target-symbol-info out)
-                            target-class-name))
-                        target-name))))
-              (arglength (+
-                          (if is-method 1 0) ;; add the implicit this argument
-                          (length arguments))))
-          (i:iterate
-            (i:for argument in arguments)
-            (jompile argument context out))
-          (write-line #?"call ${target-class}.${subroutine-name} ${arglength}" out)))))
+               (if (null target-name)
+                   (let ((func-info (function-lookup context subroutine-name)))
+                     (when (function-is-method func-info)
+                       (write-push-pointer-this out)
+                       (setf is-method t))
+                     current-class)
+                   (let* ((target-symbol-info (symbol-lookup context target-name)))
+                     (if target-symbol-info
+                         (let ((target-type (symbol-type target-symbol-info)))
+                           (assert (typep target-type 'jack-type-class))
+                           (with-slots ((target-class-name class-name)) target-type
+                             (setf is-method t)
+                             (symbol-info-to-push-command target-symbol-info out)
+                             target-class-name))
+                         target-name))))
+             (arglength (+
+                         (if is-method 1 0) ;; add the implicit this argument
+                         (length arguments))))
+        (i:iterate
+          (i:for argument in arguments)
+          (jompile argument context out))
+        (write-call #?"${target-class}.${subroutine-name}" arglength out)))))
 
 (defmethod start-of-subroutine-code ((node jack-class-method-declaration) context func-symbol-table out)
   (with-slots (current-class) context
-    (write-line "push argument 0" out)
-    (write-line "pop pointer 0" out)
+    (write-push "argument" 0 out)
+    (write-pop-pointer-this out)
     (add-symbol func-symbol-table "this" (make-instance 'jack-type-class :name current-class) :argument)))
 
 (defmethod start-of-subroutine-code ((node jack-class-constructor-declaration) context func-symbol-table out)
@@ -207,9 +248,9 @@ Expressions are turned into commands that push the calculated value onto the sta
                        (i:for (name symbol-info) in-hashtable (symbol-info-by-name class-symbol-table))
                        (when (equal (symbol-kind symbol-info) :field)
                          (i:counting name)))))
-      (write-line #?"push constant ${sizeofme}" out)
-      (write-line #?"call Memory.alloc" out)
-      (write-line #?"pop pointer 0" out))))
+      (write-push-constant sizeofme out)
+      (write-call "Memory.alloc" 1 out)
+      (write-pop-pointer-this out))))
 
 (defmethod start-of-subroutine-code ((node jack-class-function-declaration) context func-symbol-table out)
   (declare (ignore context func-symbol-table node out)))
@@ -219,7 +260,7 @@ Expressions are turned into commands that push the calculated value onto the sta
     (with-slots (name parameter-list variable-declarations statements) node
       (with-slots (parameters) parameter-list
         (let ((func-symbol-table (make-instance 'symbol-table)))
-          (write-line #?"function ${current-class}.${name} ${(subroutine-variable-count node)}" out)
+          (write-function #?"${current-class}.${name}" (subroutine-variable-count node) out)
           (start-of-subroutine-code node context func-symbol-table out)
           (i:iterate
             (i:for (name . type) in parameters)
@@ -268,12 +309,26 @@ Expressions are turned into commands that push the calculated value onto the sta
           (jompile subroutine-declaration context out))))))
 
 
+(defun get-output-filename (filename)
+  (cl-ppcre:regex-replace "(.*)\.jack$" (namestring filename) "\\1.vm"))
 
 (defun jompile-file (filename)
   (with-open-file (in filename)
-    (with-output-to-string (out)
+    (with-open-file (out (get-output-filename filename) :direction :output :if-exists :supersede)
       (let ((context (make-instance 'compilation-context)))
         (jompile (parse-class-definition (tokenize-stream in)) context out)))))
+
+
+(defun jompile-folder (foldername)
+  (i:iterate
+    (i:for filename in (directory (concatenate 'string foldername "/*.jack")))
+    (jompile-file filename)))
+
+(defun jompile-to-string (parsed)
+  (with-output-to-string (out)
+    (let ((context (make-instance 'compilation-context)))
+      (jompile parsed context out))))
+
 
 (defun tompile (instr)
   (with-input-from-string (in instr)

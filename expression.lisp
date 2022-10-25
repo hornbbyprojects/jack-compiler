@@ -2,6 +2,16 @@
 (in-package #:jack-compiler)
 (named-readtables:in-readtable :interpol-syntax)
 
+(defun maybe-parse-variable-name (token-generator)
+  (let ((next-token (maybe-read-token-type 'identifier token-generator)))
+    (when next-token
+      (identifier-value next-token))))
+
+(defun parse-variable-name (token-generator)
+  (or
+   (maybe-parse-variable-name token-generator)
+   (error "Expected an identifier for variable name!")))
+
 (defclass jack-literal (ast)
   ((value :initarg :value :accessor jack-literal-value)))
 
@@ -9,12 +19,12 @@
 
 (defun parse-integer-literal (token-generator)
   (make-instance 'jack-integer-literal
-                 :value (constant-value (read-token-type 'integer-constant token-generator))))
+                 :value (literal-value (read-token-type 'integer-literal-token token-generator))))
 
 (defclass jack-string-literal (jack-literal) ())
 (defun parse-string-literal (token-generator)
   (make-instance 'jack-string-literal
-                 :value (constant-value (read-token-type 'string-constant token-generator))))
+                 :value (literal-value (read-token-type 'string-literal-token token-generator))))
 
 (defclass jack-boolean-literal (jack-literal) ())
 (defclass jack-null (ast) ())
@@ -99,13 +109,14 @@
 
 (defun maybe-parse-binary-operator (token-generator)
   (let ((ret (trivia:match (peek-token token-generator)
-                 ((class plus-token) 'jack-plus)
-                 ((class minus-token) 'jack-minus)
-                 ((class asterisk-token) 'jack-times)
-                 ((class forward-slash-token) 'jack-divide)
-                 ((class ampersand-token) 'jack-bitwise-and)
-                 ((class pipe-token) 'jack-bitwise-or)
-                 ((class less-than-token) 'jack-less-than)
+               ((class plus-token) 'jack-plus)
+               ((class minus-token) 'jack-minus)
+               ((class asterisk-token) 'jack-times)
+               ((class forward-slash-token) 'jack-divide)
+               ((class ampersand-token) 'jack-bitwise-and)
+               ((class pipe-token) 'jack-bitwise-or)
+               ((class less-than-token) 'jack-less-than)
+                ((class equals-token) 'jack-equals)
                ((class more-than-token) 'jack-more-than))))
     (when ret (drop-token token-generator))
     ret))
@@ -126,8 +137,8 @@
      (make-instance 'jack-negate :expr (parse-term token-generator)))
     ((class tilde-token) (drop-token token-generator)
      (make-instance 'jack-bitwise-negate :expr (parse-term token-generator)))
-    ((class integer-constant) (parse-integer-literal token-generator))
-    ((class string-constant) (parse-string-literal token-generator))
+    ((class integer-literal-token) (parse-integer-literal token-generator))
+    ((class string-literal-token) (parse-string-literal token-generator))
     ((class true-token) (drop-token token-generator)
      (make-instance 'jack-boolean-literal :value t))
     ((class false-token) (drop-token token-generator)

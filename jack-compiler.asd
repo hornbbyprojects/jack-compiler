@@ -14,7 +14,8 @@
                (:file "parser" :depends-on ("tokenizer" "expression" "statement"))
                (:file "to-xml" :depends-on ("parser"))
                (:file "symbol-table" :depends-on ("parser"))
-               (:file "compiler" :depends-on ("parser" "symbol-table"))
+               (:file "write-vm")
+               (:file "compiler" :depends-on ("parser" "symbol-table" "write-vm"))
                (:file "jack-compiler")))
 
 (asdf:defsystem "jack-compiler/test"
