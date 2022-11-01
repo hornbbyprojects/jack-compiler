@@ -140,8 +140,9 @@ Expressions are turned into commands that push the calculated value onto the sta
     (i:iterate
       (i:for char in-string value)
       (write-push "temp" 1 out)
-      (write-push-constant (char-code char) out)
-      (write-call "String.appendChar" 2 out))
+      (write-push-constant (jack-char-code char) out)
+      (write-call "String.appendChar" 2 out)
+      (write-pop "temp" 0 out))
     (write-push "temp" 1 out)))
 
 (defun jack-boolean-as-int (bool)
@@ -257,7 +258,7 @@ Expressions are turned into commands that push the calculated value onto the sta
 
 (defmethod jompile ((node jack-class-subroutine-declaration) context out)
   (with-slots (symbol-tables current-class) context
-    (with-slots (name parameter-list variable-declarations statements) node
+    (with-slots (name return-type parameter-list variable-declarations statements) node
       (with-slots (parameters) parameter-list
         (let ((func-symbol-table (make-instance 'symbol-table)))
           (write-function #?"${current-class}.${name}" (subroutine-variable-count node) out)
@@ -275,6 +276,12 @@ Expressions are turned into commands that push the calculated value onto the sta
           (i:iterate
             (i:for statement in statements)
             (jompile statement context out))
+          (when (typep return-type 'jack-type-void)
+            ;; add a return; at the end of a void function to make optional
+            (jompile
+             (make-instance 'jack-return-statement :expression nil)
+             context
+             out))
           (pop symbol-tables))))))
 
 (defmethod jompile ((node jack-class-definition) context out)
