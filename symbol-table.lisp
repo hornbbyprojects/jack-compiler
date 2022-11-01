@@ -6,7 +6,7 @@
 (defclass symbol-information ()
   ((kind :initarg :kind :accessor symbol-kind) ;; :static, :field, :argument, or :var
    (type :initarg :type :accessor symbol-type)
-   (index :initarg :index)))
+   (index :initarg :index :accessor symbol-index)))
 
 (defclass symbol-table ()
   ((next-index-by-kind :initform (make-hash-table :test 'equal))

@@ -149,6 +149,7 @@ Or a cons cell with the string to be decoded and the name
 
 (defclass sm-token-generator (token-generator)
    ((next-token :initform nil :accessor peek-token)
+    (line-number :initform 1)
     (stream :initarg :stream)))
 
 
@@ -163,10 +164,12 @@ Or a cons cell with the string to be decoded and the name
     (otherwise nil)))
 
 (defun skip-whitespace (stream)
+  "Skip whitespace, returning number of new lines passed"
   (i:iterate
     (i:for next-char next (peek-char nil stream))
     (unless (whitespace-char-p next-char)
       (i:terminate))
+    (i:counting (equal next-char #\Newline))
     (read-char stream)))
 
 
@@ -194,8 +197,11 @@ Or a cons cell with the string to be decoded and the name
     (i:collecting next-char result-type string)))
 
 (defun finish-multiline-comment (stream)
+  "Returns the number of newlines consumed"
   (i:iterate
     (i:for next-char next (read-char stream))
+    (i:counting
+        (equal next-char #\Newline))
     (when
         (and
          (equal next-char #\*)
@@ -211,7 +217,11 @@ Or a cons cell with the string to be decoded and the name
      (i:with escaped = nil)
      (i:for next-char next (read-char stream))
      (if escaped
-         (setf escaped nil)
+         (progn
+           (setf escaped nil)
+           (when (equal next-char #\n)
+             (i:collecting #\Newline result-type string)
+             (i:next-iteration)))
          (progn
            (when (equal next-char #\")
              (i:terminate))
@@ -233,8 +243,8 @@ Or a cons cell with the string to be decoded and the name
       (i:collecting next-char result-type string)))))
 
 (defun next-token-from-stream (tg)
-  (with-slots (stream) tg
-    (skip-whitespace stream)
+  (with-slots (stream line-number) tg
+    (incf line-number (skip-whitespace stream))
     (let* ((next-char (peek-char nil stream))
            (symbol (gethash (string next-char) *token-lookup-table*)))
       (cond
@@ -245,11 +255,13 @@ Or a cons cell with the string to be decoded and the name
             (trivia:match subsequent
               (#\*
                (read-char stream)
-               (finish-multiline-comment stream)
+               (incf line-number
+                     (finish-multiline-comment stream))
                :comment)
               (#\/
                (read-char stream)
                (finish-single-line-comment stream)
+               (incf line-number)
                :comment)
               (otherwise
                (make-instance 'forward-slash-token)))))
