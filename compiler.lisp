@@ -132,6 +132,11 @@ Expressions are turned into commands that push the calculated value onto the sta
 (defmethod jompile ((node jack-null) context out)
   (write-push-constant 0 out))
 
+(defun jack-char-code (char)
+  (trivia:match char
+    (#\Newline 128)
+    (otherwise (char-code char))))
+
 (defmethod jompile ((node jack-string-literal) context out)
   (with-slots (value) node
     (write-push-constant (length value) out)
